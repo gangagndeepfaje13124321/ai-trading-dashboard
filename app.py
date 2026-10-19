@@ -3,39 +3,43 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from datetime import datetime
 
-st.set_page_config(page_title="AI Trading Assistant", page_icon="📈", layout="wide")
-st.title("📈 AI Trading Assistant")
-st.caption("Version 2 • Intraday technical analysis and educational backtesting")
+st.set_page_config(page_title="Market Pattern Explorer", page_icon="📈", layout="wide")
+st.title("📈 Market Pattern Explorer")
+st.caption("A plain-English view of recent price behaviour and a short-range statistical projection. Not a trading-signal service.")
 
 INTERVALS = {
-    "1 minute": {"yf": "1m", "tv": "1", "periods": ["1d", "5d", "7d"], "default": "5d", "max_note": "Yahoo Finance typically limits 1-minute history to about 7 days."},
-    "5 minutes": {"yf": "5m", "tv": "5", "periods": ["1d", "5d", "1mo", "2mo", "60d"], "default": "1mo", "max_note": "Yahoo Finance typically limits 5-minute history to about 60 days."},
-    "15 minutes": {"yf": "15m", "tv": "15", "periods": ["5d", "1mo", "3mo", "60d"], "default": "1mo", "max_note": "Intraday history limits depend on ticker and provider."},
-    "1 hour": {"yf": "60m", "tv": "60", "periods": ["5d", "1mo", "3mo", "6mo", "1y"], "default": "3mo", "max_note": "Hourly history limits depend on ticker and provider."},
-    "1 day": {"yf": "1d", "tv": "D", "periods": ["1mo", "3mo", "6mo", "1y", "2y", "5y"], "default": "6mo", "max_note": "Daily data is suitable for longer historical comparisons."},
+    "1 minute": {"yf": "1m", "tv": "1", "periods": ["1d", "5d", "7d"], "default": "5d", "limit": "1-minute history is usually limited to around 7 days by Yahoo Finance. You cannot reliably request a full month of 1-minute candles from this source."},
+    "5 minutes": {"yf": "5m", "tv": "5", "periods": ["5d", "1mo", "2mo"], "default": "1mo", "limit": "5-minute history is usually limited to around 60 days. One month is a useful recent-history starting point."},
+    "15 minutes": {"yf": "15m", "tv": "15", "periods": ["5d", "1mo", "3mo", "60d"], "default": "1mo", "limit": "Intraday history availability varies by ticker and provider."},
+    "1 hour": {"yf": "60m", "tv": "60", "periods": ["5d", "1mo", "3mo", "6mo", "1y"], "default": "1mo", "limit": "Hourly history availability varies by ticker and provider."},
+    "1 day": {"yf": "1d", "tv": "D", "periods": ["1mo", "3mo", "6mo", "1y", "2y"], "default": "1mo", "limit": "Daily candles are better for looking at longer-term movement, not the next few minutes."},
 }
 
 with st.sidebar:
     st.header("Market settings")
-    symbol = st.text_input("Ticker symbol", value="AAPL", help="Examples: AAPL, MSFT, NVDA, BTC-USD")
-    interval_label = st.selectbox("Analysis + chart interval", list(INTERVALS.keys()), index=0)
+    symbol = st.text_input("Ticker symbol", value="AAPL", help="The market code for the asset. Examples: AAPL (Apple), MSFT (Microsoft), NVDA (Nvidia), BTC-USD (Bitcoin).")
+    st.caption("**Ticker = what to study.** Use the code shown by your data provider.")
+    interval_label = st.selectbox("Candle interval", list(INTERVALS.keys()), index=0, help="Each candle summarises price movement over this amount of time. A 1-minute candle covers one minute; a 5-minute candle covers five minutes.")
+    st.caption("**Candle interval = the size of each step on the graph.** Short intervals show more detail but also more random noise.")
     config = INTERVALS[interval_label]
-    period = st.selectbox("History for analysis", config["periods"], index=config["periods"].index(config["default"]))
-    run = st.button("Run analysis", type="primary", use_container_width=True)
-    st.caption("The selected interval now controls both the embedded chart and Python analysis/backtest, where data is available.")
-    st.caption(config["max_note"])
+    period = st.selectbox("Recent history to analyse", config["periods"], index=config["periods"].index(config["default"]), help="How far back the app looks to find patterns. Recent history can reflect current conditions better, but short samples can also be misleading.")
+    st.caption("**History = the sample of past candles studied.** For 1-minute data, choose up to 7 days; for 5-minute data, 1 month is a sensible starting point.")
+    refresh = st.button("Refresh market data", type="primary", use_container_width=True, help="Fetch the latest candles available from Yahoo Finance. This does not guarantee exchange-live prices.")
+    st.info(config["limit"])
+    st.caption("Data is refreshed when you press the button or reload the page. Provider updates may be delayed.")
 
-clean_symbol = symbol.strip().upper().replace(" ", "")
-if not clean_symbol:
-    st.warning("Enter a ticker symbol in the sidebar.")
+symbol_clean = symbol.strip().upper().replace(" ", "")
+if not symbol_clean:
+    st.warning("Enter a ticker symbol in Market settings.")
     st.stop()
 
-# TradingView chart is embedded for viewing; Python analysis independently uses Yahoo Finance.
-tv_symbol = clean_symbol
+# Keep the familiar TradingView chart; analysis and forecast below use Yahoo Finance candles.
+tv_symbol = symbol_clean
 tv_html = f"""
-<div class="tradingview-widget-container" style="height:520px;width:100%">
-  <div id="tradingview_chart" style="height:520px;width:100%"></div>
+<div class="tradingview-widget-container" style="height:500px;width:100%">
+  <div id="tradingview_chart" style="height:500px;width:100%"></div>
   <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
   <script type="text/javascript">
   new TradingView.widget({{
@@ -47,109 +51,167 @@ tv_html = f"""
   </script>
 </div>
 """
-st.subheader(f"TradingView chart — {clean_symbol} ({interval_label})")
-st.components.v1.html(tv_html, height=530, scrolling=False)
+st.subheader(f"Market chart — {symbol_clean} ({interval_label})")
+st.components.v1.html(tv_html, height=510, scrolling=False)
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_data(ticker, history_period, interval):
-    df = yf.download(ticker, period=history_period, interval=interval, auto_adjust=True, progress=False, prepost=False)
+    df = yf.download(ticker, period=history_period, interval=interval, auto_adjust=True, progress=False, prepost=False, threads=False)
     if df.empty:
         return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    needed = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-    df = df[needed].copy()
+    wanted = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+    df = df[wanted].copy()
     df = df[~df.index.duplicated(keep="last")]
-    return df.dropna(subset=["Close"])
+    return df.dropna(subset=["Open", "High", "Low", "Close"])
 
-cache_key = (clean_symbol, period, config["yf"])
-if run or "market_data" not in st.session_state or st.session_state.get("loaded_key") != cache_key:
-    with st.spinner(f"Downloading {interval_label.lower()} data for {clean_symbol}..."):
-        try:
-            st.session_state.market_data = load_data(clean_symbol, period, config["yf"])
+cache_key = (symbol_clean, period, config["yf"])
+if refresh or "market_data" not in st.session_state or st.session_state.get("loaded_key") != cache_key:
+    try:
+        with st.spinner(f"Loading recent {interval_label.lower()} candles for {symbol_clean}..."):
+            st.session_state.market_data = load_data(symbol_clean, period, config["yf"])
             st.session_state.loaded_key = cache_key
-        except Exception as exc:
-            st.error(f"Could not download data: {exc}")
-            st.stop()
+    except Exception as exc:
+        st.error(f"Could not load market data: {exc}")
+        st.stop()
 
 data = st.session_state.market_data.copy()
 if data.empty:
-    st.error("No data was returned for this ticker, interval, and history period. Try a shorter period, a different ticker, or daily data. Provider availability varies by exchange and symbol.")
+    st.error("No candles were returned. Check the ticker, try a shorter history, or try another interval. Some markets have limited data access.")
     st.stop()
 
-close = data["Close"].astype(float)
-data["SMA20"] = close.rolling(20, min_periods=20).mean()
-data["SMA50"] = close.rolling(50, min_periods=50).mean()
-delta = close.diff()
-gain = delta.clip(lower=0).rolling(14, min_periods=14).mean()
-loss = (-delta.clip(upper=0)).rolling(14, min_periods=14).mean()
-rs = gain / loss.replace(0, np.nan)
-data["RSI14"] = 100 - (100 / (1 + rs))
+# Candle-by-candle measurements: describe the candle's shape and change, not a trading instruction.
+data["Change"] = data["Close"].diff()
+data["Change_pct"] = data["Close"].pct_change() * 100
+data["Candle_range"] = data["High"] - data["Low"]
+data["Body"] = data["Close"] - data["Open"]
+data["Body_pct"] = np.where(data["Open"] != 0, data["Body"] / data["Open"] * 100, np.nan)
+data["Upper_wick"] = data["High"] - data[["Open", "Close"]].max(axis=1)
+data["Lower_wick"] = data[["Open", "Close"]].min(axis=1) - data["Low"]
+data["Range_pct"] = np.where(data["Close"] != 0, data["Candle_range"] / data["Close"] * 100, np.nan)
+data["Move_5"] = data["Close"].pct_change(5) * 100
+data["Move_10"] = data["Close"].pct_change(10) * 100
 
+close = data["Close"].astype(float).dropna()
 latest = float(close.iloc[-1])
 previous = float(close.iloc[-2]) if len(close) > 1 else latest
-change_pct = ((latest / previous) - 1) * 100 if previous else 0
-sma20 = data["SMA20"].iloc[-1]
-sma50 = data["SMA50"].iloc[-1]
-rsi = data["RSI14"].iloc[-1]
+last_change = (latest / previous - 1) * 100 if previous else 0
+
+# Use the most recent 30 candle closes for a simple linear-trend extrapolation.
+# The uncertainty band is estimated from recent one-candle changes and grows with forecast distance.
+lookback = min(30, len(close))
+recent = close.iloc[-lookback:].to_numpy(dtype=float)
+steps = min(10, max(5, len(recent) // 3))
+future_x = np.arange(lookback, lookback + steps)
+if lookback >= 3:
+    x = np.arange(lookback, dtype=float)
+    slope, intercept = np.polyfit(x, recent, 1)
+    fitted = slope * x + intercept
+    residuals = recent - fitted
+    residual_sd = float(np.std(residuals, ddof=1)) if len(residuals) > 2 else 0.0
+    projected = slope * future_x + intercept
+    recent_changes = np.diff(recent)
+    step_sd = float(np.std(recent_changes, ddof=1)) if len(recent_changes) > 2 else 0.0
+    # A broad, increasing band communicates uncertainty; not a calibrated confidence interval.
+    spread = np.sqrt(np.arange(1, steps + 1)) * max(step_sd, residual_sd * 0.5, latest * 0.0001)
+    upper = projected + 1.5 * spread
+    lower = projected - 1.5 * spread
+    start_fit = slope * x + intercept
+else:
+    projected = np.repeat(latest, steps)
+    upper = projected + latest * 0.002
+    lower = projected - latest * 0.002
+    start_fit = recent
+
+# Human-readable summary based on the most recent 10 candles and slope fit.
+recent_n = min(10, len(close))
+recent_move = (float(close.iloc[-1]) / float(close.iloc[-recent_n]) - 1) * 100 if recent_n > 1 else 0.0
+if len(recent) >= 3:
+    fitted_change = ((float(projected[-1]) / float(projected[0])) - 1) * 100 if projected[0] else 0.0
+else:
+    fitted_change = 0.0
+if recent_move > 0.05:
+    direction_words = "has generally moved up"
+elif recent_move < -0.05:
+    direction_words = "has generally moved down"
+else:
+    direction_words = "has mostly moved sideways"
+if abs(fitted_change) < 0.05:
+    forecast_words = "roughly flat in the simple trend projection"
+elif fitted_change > 0:
+    forecast_words = "slightly upward in the simple trend projection"
+else:
+    forecast_words = "slightly downward in the simple trend projection"
+
+st.subheader("At a glance")
+a, b, c = st.columns(3)
+a.metric("Latest available price", f"{latest:,.4f}", f"{last_change:+.3f}% vs previous candle")
+b.metric(f"Price change over last {recent_n} candles", f"{recent_move:+.3f}%")
+c.metric("Candles analysed", f"{len(data):,}", help="Each row is one candle in the selected interval and history window.")
+st.caption(f"Data source: Yahoo Finance · Latest candle timestamp: {data.index[-1]} · This is the latest data returned by the provider, not necessarily the current live market price.")
 
 st.divider()
-st.subheader(f"Market snapshot — {interval_label} candles")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Latest available close", f"{latest:,.2f}", f"{change_pct:+.2f}% vs prior candle")
-c2.metric("20-candle average", f"{sma20:,.2f}" if pd.notna(sma20) else "Not enough data")
-c3.metric("50-candle average", f"{sma50:,.2f}" if pd.notna(sma50) else "Not enough data")
-c4.metric("14-candle RSI", f"{rsi:.1f}" if pd.notna(rsi) else "Not enough data")
-
-st.subheader("Technical analysis report")
-report = []
-if pd.notna(sma20) and pd.notna(sma50):
-    if latest > sma20 and sma20 > sma50:
-        report.append("Trend snapshot: bullish alignment — latest close is above the 20-candle average, which is above the 50-candle average.")
-    elif latest < sma20 and sma20 < sma50:
-        report.append("Trend snapshot: bearish alignment — latest close is below the 20-candle average, which is below the 50-candle average.")
-    else:
-        report.append("Trend snapshot: mixed — price and moving averages do not show a clear bullish or bearish alignment.")
+st.subheader("Recent price and 5–10 minute projection")
+st.write("**Solid line:** observed closing prices. **Dashed line:** a straight-line trend fitted to the latest candles and extended forward. **Shaded band:** a rough uncertainty range that widens with time. It is an estimate, not a promise or a statistically validated confidence interval.")
+fig = go.Figure()
+show_n = min(100, len(data))
+visible = data.iloc[-show_n:]
+fig.add_trace(go.Scatter(x=visible.index, y=visible["Close"], mode="lines", name="Observed close", line=dict(width=2)))
+if lookback >= 3:
+    fit_index = data.index[-lookback:]
+    fig.add_trace(go.Scatter(x=fit_index, y=start_fit, mode="lines", name="Recent straight-line fit", line=dict(dash="dot", width=1.5)))
+# Build future timestamps using the median spacing between available candles.
+if len(data.index) >= 2:
+    diffs = pd.Series(data.index).diff().dropna()
+    step_delta = diffs.median()
 else:
-    report.append("Trend snapshot: not enough candles to calculate both moving averages.")
-if pd.notna(rsi):
-    if rsi >= 70:
-        report.append(f"Momentum: RSI is {rsi:.1f}, commonly interpreted as overbought territory. This is not, by itself, a sell signal.")
-    elif rsi <= 30:
-        report.append(f"Momentum: RSI is {rsi:.1f}, commonly interpreted as oversold territory. This is not, by itself, a buy signal.")
-    else:
-        report.append(f"Momentum: RSI is {rsi:.1f}, between the commonly watched 30 and 70 levels.")
-report.append(f"Data note: Python analysis uses {interval_label.lower()} adjusted candles from Yahoo Finance. Latest candle timestamp returned: {data.index[-1]}.")
-report.append("The TradingView embed and Yahoo Finance may use different feeds, timestamps, or update schedules. This is indicator-based analysis, not a guaranteed prediction.")
-for item in report:
-    st.write("• " + item)
-
-with st.expander("Show recent candles"):
-    cols = [c for c in ["Open", "High", "Low", "Close", "Volume", "SMA20", "SMA50", "RSI14"] if c in data.columns]
-    st.dataframe(data[cols].tail(50).sort_index(ascending=False), use_container_width=True)
+    step_delta = pd.Timedelta(minutes=1)
+future_times = [data.index[-1] + step_delta * i for i in range(1, steps + 1)]
+forecast_x = [data.index[-1]] + future_times
+forecast_y = [latest] + list(projected)
+upper_y = [latest] + list(upper)
+lower_y = [latest] + list(lower)
+fig.add_trace(go.Scatter(x=forecast_x, y=upper_y, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip", name="Upper range"))
+fig.add_trace(go.Scatter(x=forecast_x, y=lower_y, mode="lines", line=dict(width=0), fill="tonexty", fillcolor="rgba(100, 149, 237, 0.18)", name="Uncertainty range", hoverinfo="skip"))
+fig.add_trace(go.Scatter(x=forecast_x, y=forecast_y, mode="lines+markers", name="Simple projection", line=dict(dash="dash", width=2)))
+fig.add_vline(x=data.index[-1], line_dash="dash", line_width=1, annotation_text="Now (latest data)")
+fig.update_layout(template="plotly_dark", height=520, xaxis_title="Time", yaxis_title="Price", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+st.plotly_chart(fig, use_container_width=True)
+st.info(f"Plain-English reading: over the latest {recent_n} candles, price {direction_words}. Extending a straight line through the most recent {lookback} closes gives a projection that is {forecast_words}. Short-term prices can change direction quickly; treat this as one simple mathematical baseline, not a reliable prediction of what must happen.")
 
 st.divider()
-st.subheader(f"Historical backtest — {interval_label} candles")
-st.write("Educational example: hold the asset when its 20-candle average is above its 50-candle average; otherwise stay in cash. The signal is shifted by one candle to reduce look-ahead bias. This simplified test excludes fees, spread, slippage, taxes, and execution delays.")
-bt = data[["Close", "SMA20", "SMA50"]].dropna().copy()
-if len(bt) < 5:
-    st.info("Not enough candles to backtest. Choose a longer history period or a slower interval.")
-else:
-    bt["Market_Return"] = bt["Close"].pct_change().fillna(0)
-    bt["Signal"] = (bt["SMA20"] > bt["SMA50"]).astype(int).shift(1).fillna(0)
-    bt["Strategy_Return"] = bt["Signal"] * bt["Market_Return"]
-    bt["Buy_Hold_Equity"] = (1 + bt["Market_Return"]).cumprod()
-    bt["Strategy_Equity"] = (1 + bt["Strategy_Return"]).cumprod()
-    market_return = (bt["Buy_Hold_Equity"].iloc[-1] - 1) * 100
-    strategy_return = (bt["Strategy_Equity"].iloc[-1] - 1) * 100
-    b1, b2, b3 = st.columns(3)
-    b1.metric("Strategy total return", f"{strategy_return:+.2f}%")
-    b2.metric("Buy & hold return", f"{market_return:+.2f}%")
-    b3.metric("Test observations", f"{len(bt):,} candles")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=bt.index, y=bt["Strategy_Equity"], mode="lines", name="Moving-average strategy"))
-    fig.add_trace(go.Scatter(x=bt.index, y=bt["Buy_Hold_Equity"], mode="lines", name="Buy & hold"))
-    fig.update_layout(title="Growth of $1 (before fees and taxes)", xaxis_title="Timestamp", yaxis_title="Portfolio value ($)", template="plotly_dark", height=420, legend=dict(orientation="h"))
-    st.plotly_chart(fig, use_container_width=True)
+st.subheader("What each candle says")
+st.write("A candle summarises the price during one interval. The app measures every candle in the selected history, then shows the latest 30 below so the table stays readable.")
+with st.expander("How to read a candle (plain English)"):
+    st.markdown("""
+- **Open:** first price recorded during the interval.
+- **High / Low:** highest and lowest prices recorded during the interval.
+- **Close:** last price recorded during the interval.
+- **Candle body:** close minus open. Positive means the interval ended above its opening price; negative means it ended below.
+- **Wicks:** the distance from the body to the high or low. Long wicks mean price travelled further but did not finish there.
+- **Change %:** percentage change from the previous candle's close to this candle's close.
+- **Range %:** high-to-low distance as a percentage of price. A larger number means a wider move during that candle.
+""")
 
-st.caption("Important: this app does not place trades or guarantee predictions. Intraday data availability is limited by the data provider and may be delayed or incomplete. Use paper trading and realistic costs before considering real-money decisions.")
+recent_table = data.tail(30).copy().sort_index(ascending=False)
+recent_table = recent_table.rename(columns={"Open":"Open", "High":"High", "Low":"Low", "Close":"Close", "Volume":"Volume", "Change_pct":"Change %", "Body_pct":"Body %", "Range_pct":"Range %", "Move_5":"Change over 5 candles %", "Move_10":"Change over 10 candles %"})
+show_cols = [c for c in ["Open", "High", "Low", "Close", "Volume", "Change %", "Body %", "Range %", "Change over 5 candles %", "Change over 10 candles %"] if c in recent_table.columns]
+st.dataframe(recent_table[show_cols].style.format(precision=4, na_rep="—"), use_container_width=True)
+
+with st.expander("Summary of patterns in the selected history"):
+    returns = data["Change_pct"].dropna()
+    if len(returns):
+        up = int((returns > 0).sum())
+        down = int((returns < 0).sum())
+        unchanged = int((returns == 0).sum())
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Candles closing up", f"{up:,}", f"{up/len(returns)*100:.1f}% of changes")
+        s2.metric("Candles closing down", f"{down:,}", f"{down/len(returns)*100:.1f}% of changes")
+        s3.metric("Unchanged closes", f"{unchanged:,}")
+        s4.metric("Typical candle range", f"{data['Range_pct'].median():.3f}% of price")
+        st.write("These are descriptions of the selected past sample. They do not show that the same pattern will continue.")
+    else:
+        st.write("There are not enough candles to summarise price changes.")
+
+st.caption("This version does not recommend trades or strategies. The forecast is a simple linear extrapolation of recent closes, with a rough uncertainty band. It does not yet use a trained AI model, order-book data, or a guaranteed live exchange feed. Yahoo Finance can delay, omit, or limit intraday data.")
