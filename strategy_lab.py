@@ -77,17 +77,17 @@ def _sign(value, threshold):
     return 0
 
 
-def _prior_index(rows, index, horizon_minutes):
+def _prior_index(rows, index, horizon_minutes, times=None):
     """Find the closest candle at or just before the requested lookback time."""
     target_time = rows[index]["time"] - timedelta(minutes=horizon_minutes)
-    times = [row["time"] for row in rows[:index + 1]]
+    times = times if times is not None else [row["time"] for row in rows[:index + 1]]
     prior = bisect_left(times, target_time + timedelta(microseconds=1)) - 1
     if prior < 0 or target_time - rows[prior]["time"] > timedelta(minutes=1):
         return None
     return prior
 
 
-def _signal(name, rows, index, horizon_minutes):
+def _signal(name, rows, index, horizon_minutes, times=None):
     """Return a rule's direction using information available at `index`."""
     current = rows[index]
     price = current["close"]
@@ -97,7 +97,7 @@ def _signal(name, rows, index, horizon_minutes):
     noise = max(_median(ranges) * 0.08, price * 0.0000001)
 
     if name == "momentum":
-        prior_index = _prior_index(rows, index, horizon_minutes)
+        prior_index = _prior_index(rows, index, horizon_minutes, times)
         if prior_index is None:
             return 0
         return _sign(price - rows[prior_index]["close"], noise * 0.1)
@@ -147,7 +147,7 @@ def _training_records(rows, model, horizon, warmup, end_index):
         target_index = _target_index(rows, times, index, horizon)
         if target_index is None or target_index >= end_index:
             continue
-        direction = _signal(model, rows, index, horizon)
+        direction = _signal(model, rows, index, horizon, times)
         if not direction:
             continue
         origin = rows[index]["close"]
@@ -183,8 +183,8 @@ def _evaluate_holdout(rows, model, expected_returns, horizon, start_index, warmu
         origins += 1
         naive_errors.append(abs(actual_return) * 100)
 
-        momentum_direction = _signal("momentum", rows, index, horizon)
-        momentum_prior_index = _prior_index(rows, index, horizon)
+        momentum_direction = _signal("momentum", rows, index, horizon, times)
+        momentum_prior_index = _prior_index(rows, index, horizon, times)
         momentum_prior = rows[momentum_prior_index]["close"] if momentum_prior_index is not None else origin
         momentum_return = (origin - momentum_prior) / momentum_prior
         momentum_errors.append(abs(momentum_return - actual_return) * 100)
@@ -192,7 +192,7 @@ def _evaluate_holdout(rows, model, expected_returns, horizon, start_index, warmu
             momentum_calls += 1
             momentum_wins += int(momentum_direction == _sign(actual_return, 1e-12))
 
-        direction = _signal(model, rows, index, horizon)
+        direction = _signal(model, rows, index, horizon, times)
         expected_return = expected_returns.get(direction) if direction else None
         if expected_return is None:
             continue
