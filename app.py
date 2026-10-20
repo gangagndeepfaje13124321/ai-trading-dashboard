@@ -287,10 +287,9 @@ st.caption("This dashboard describes historical price behaviour. It does not pro
 st.divider()
 st.subheader("Live spot tracker + rolling short-range projection")
 st.caption(
-    "For BTC/ETH/SOL this samples Binance's public spot price every 2 seconds and builds a live display. "
-    "These are sampled observations, not official one-second candles. The yellow line is a rolling baseline "
-    "from recent Yahoo candles; the blue line is the same baseline shifted by live price movement. "
-    "No forecast can reliably know the next move."
+    "For supported markets this samples a public spot ticker about every 2 seconds (Binance first, Kraken fallback). "
+    "These are sampled observations, not official one-second candles. The dashed line and shaded range are "
+    "simple baselines, not calibrated predictions."
 )
 
 live_symbol_map = {
@@ -299,16 +298,16 @@ live_symbol_map = {
 }
 live_pair = live_symbol_map.get(symbol_clean)
 if not live_pair:
-    st.info("Live second-by-second sampling currently supports BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD and DOGE-USD. Other tickers still use the historical chart above.")
+    st.info("Live spot sampling currently supports BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD and DOGE-USD. Other tickers still use the historical chart above.")
 else:
     @st.fragment(run_every="2s")
     def live_market_panel():
         import requests
-        from datetime import timezone
         try:
             # Try Binance first, then Kraken. Some cloud hosts/regions receive
             # HTTP 403/451 from Binance, so don't rely on a single exchange.
             spot = None
+            provider = None
             errors = []
             try:
                 response = requests.get(
@@ -317,9 +316,12 @@ else:
                 )
                 response.raise_for_status()
                 spot = float(response.json()["price"])
+                provider = "Binance"
             except Exception as exc:
                 status = getattr(getattr(exc, "response", None), "status_code", None)
-                errors.append(f"Binance: HTTP {status}" if status else f"Binance: {type(exc).__name__}")
+                reason = getattr(getattr(exc, "response", None), "reason", None)
+                detail = f"HTTP {status}" + (f" {reason}" if reason else "") if status else f"{type(exc).__name__}: {str(exc)[:120]}"
+                errors.append(f"Binance: {detail}")
 
             if spot is None:
                 kraken_pairs = {
@@ -342,18 +344,27 @@ else:
                         if not result:
                             raise ValueError("Kraken returned no ticker data")
                         spot = float(next(iter(result.values()))["c"][0])
+                        provider = "Kraken"
                     except Exception as exc:
                         status = getattr(getattr(exc, "response", None), "status_code", None)
-                        errors.append(f"Kraken: HTTP {status}" if status else f"Kraken: {type(exc).__name__}")
+                        reason = getattr(getattr(exc, "response", None), "reason", None)
+                        detail = f"HTTP {status}" + (f" {reason}" if reason else "") if status else f"{type(exc).__name__}: {str(exc)[:120]}"
+                        errors.append(f"Kraken: {detail}")
             if spot is None:
-                raise RuntimeError("Both live providers failed (" + "; ".join(errors) + "). Check Streamlit Cloud logs/network access.")
+                raise RuntimeError("Both live providers failed (" + ("; ".join(errors) or "no price returned") + ").")
             now = pd.Timestamp.now(tz="UTC")
             key = f"live_samples_{live_pair}"
             samples = st.session_state.get(key, [])
-            samples.append({"time": now, "price": spot})
+            # Do not combine prices from two exchanges in the same chart or volatility estimate.
+            if samples and samples[-1].get("provider") != provider:
+                samples = []
+            samples.append({"time": now, "price": spot, "provider": provider})
             samples = samples[-180:]
             st.session_state[key] = samples
-            st.metric("Live sampled spot price", f"{spot:,.6f}", help="Current Binance spot quote, polled every ~2 seconds.")
+            st.metric("Live sampled spot price", f"{spot:,.6f}", help=f"Current {provider} spot quote. This is a sampled quote, not a one-second OHLC candle.")
+            st.caption(f"Source: {provider} · received {now.strftime('%Y-%m-%d %H:%M:%S')} UTC · polled about every 2 seconds.")
+            if errors:
+                st.caption("Fallback detail: " + "; ".join(errors))
             live_df = pd.DataFrame(samples)
             if len(live_df) >= 2:
                 # Calculate the recent historical baseline's direction, then anchor it to live price.
