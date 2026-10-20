@@ -306,12 +306,47 @@ else:
         import requests
         from datetime import timezone
         try:
-            response = requests.get(
-                f"https://api.binance.com/api/v3/ticker/price?symbol={live_pair}",
-                timeout=4
-            )
-            response.raise_for_status()
-            spot = float(response.json()["price"])
+            # Try Binance first, then Kraken. Some cloud hosts/regions receive
+            # HTTP 403/451 from Binance, so don't rely on a single exchange.
+            spot = None
+            errors = []
+            try:
+                response = requests.get(
+                    f"https://api.binance.com/api/v3/ticker/price?symbol={live_pair}",
+                    timeout=4, headers={"User-Agent": "Mozilla/5.0 MarketPatternExplorer/1.0"}
+                )
+                response.raise_for_status()
+                spot = float(response.json()["price"])
+            except Exception as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                errors.append(f"Binance: HTTP {status}" if status else f"Binance: {type(exc).__name__}")
+
+            if spot is None:
+                kraken_pairs = {
+                    "BTC-USD": "XBTUSD", "ETH-USD": "ETHUSD", "SOL-USD": "SOLUSD",
+                    "BNB-USD": "BNBUSD", "XRP-USD": "XRPUSD", "DOGE-USD": "DOGEUSD"
+                }
+                kraken_pair = kraken_pairs.get(symbol_clean)
+                if kraken_pair:
+                    try:
+                        response = requests.get(
+                            "https://api.kraken.com/0/public/Ticker",
+                            params={"pair": kraken_pair}, timeout=5,
+                            headers={"User-Agent": "Mozilla/5.0 MarketPatternExplorer/1.0"}
+                        )
+                        response.raise_for_status()
+                        payload = response.json()
+                        if payload.get("error"):
+                            raise ValueError("Kraken API returned an error")
+                        result = payload.get("result", {})
+                        if not result:
+                            raise ValueError("Kraken returned no ticker data")
+                        spot = float(next(iter(result.values()))["c"][0])
+                    except Exception as exc:
+                        status = getattr(getattr(exc, "response", None), "status_code", None)
+                        errors.append(f"Kraken: HTTP {status}" if status else f"Kraken: {type(exc).__name__}")
+            if spot is None:
+                raise RuntimeError("Both live providers failed (" + "; ".join(errors) + "). Check Streamlit Cloud logs/network access.")
             now = pd.Timestamp.now(tz="UTC")
             key = f"live_samples_{live_pair}"
             samples = st.session_state.get(key, [])
@@ -354,7 +389,7 @@ else:
             else:
                 st.info("Collecting live samples. The chart will appear after the next update.")
         except Exception as exc:
-            st.warning(f"Live spot feed is temporarily unavailable: {type(exc).__name__}. The historical chart above remains available.")
+            st.warning(f"Live spot feed is temporarily unavailable: {exc}. The historical chart above remains available.")
     live_market_panel()
 
 st.divider()
