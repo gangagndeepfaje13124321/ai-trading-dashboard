@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
 
 st.set_page_config(page_title="Market Pattern Explorer", page_icon="📈", layout="wide")
 st.title("📈 Market Pattern Explorer")
@@ -19,7 +18,7 @@ INTERVALS = {
 
 with st.sidebar:
     st.header("Market settings")
-    symbol = st.text_input("Ticker symbol", value="AAPL", help="The market code for the asset. Examples: AAPL (Apple), MSFT (Microsoft), NVDA (Nvidia), BTC-USD (Bitcoin).")
+    symbol = st.text_input("Ticker symbol", value="BTC-USD", help="The market code for the asset. Examples: AAPL (Apple), MSFT (Microsoft), NVDA (Nvidia), BTC-USD (Bitcoin).")
     st.caption("**Ticker = what to study.** Use the code shown by your data provider.")
     interval_label = st.selectbox("Candle interval", list(INTERVALS.keys()), index=0, help="Each candle summarises price movement over this amount of time. A 1-minute candle covers one minute; a 5-minute candle covers five minutes.")
     st.caption("**Candle interval = the size of each step on the graph.** Short intervals show more detail but also more random noise.")
@@ -56,29 +55,78 @@ st.components.v1.html(tv_html, height=510, scrolling=False)
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_data(ticker, history_period, interval):
-    df = yf.download(ticker, period=history_period, interval=interval, auto_adjust=True, progress=False, prepost=False, threads=False)
-    if df.empty:
-        return pd.DataFrame()
+    """Download recent candles and return a clean OHLCV DataFrame."""
+    try:
+        df = yf.download(
+            ticker,
+            period=history_period,
+            interval=interval,
+            auto_adjust=True,
+            progress=False,
+            prepost=False,
+            threads=False,
+            timeout=20,
+        )
+    except Exception as exc:
+        # Return a readable error to the caller rather than silently crashing.
+        return pd.DataFrame(), f"{type(exc).__name__}: {exc}"
+
+    if df is None or df.empty:
+        return pd.DataFrame(), (
+            f"Yahoo Finance returned no candles for ticker={ticker}, "
+            f"period={history_period}, interval={interval}. "
+            "Try BTC-USD, a shorter history, or another interval."
+        )
+
+    # Recent yfinance versions may return multi-level column labels.
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    wanted = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+        # Prefer the level that contains standard OHLCV column names.
+        ohlc_names = {"Open", "High", "Low", "Close", "Volume"}
+        matching_level = None
+        for level in range(df.columns.nlevels):
+            if ohlc_names.intersection(set(df.columns.get_level_values(level))):
+                matching_level = level
+                break
+        if matching_level is not None:
+            df.columns = df.columns.get_level_values(matching_level)
+
+    # Remove any duplicate column labels that may remain after flattening.
+    df = df.loc[:, ~df.columns.duplicated()]
+    required = ["Open", "High", "Low", "Close"]
+    if not all(col in df.columns for col in required):
+        return pd.DataFrame(), (
+            "Yahoo Finance returned data, but the expected Open, High, Low, "
+            "and Close columns were missing."
+        )
+
+    wanted = [col for col in required + ["Volume"] if col in df.columns]
     df = df[wanted].copy()
     df = df[~df.index.duplicated(keep="last")]
-    return df.dropna(subset=["Open", "High", "Low", "Close"])
+    df = df.dropna(subset=required)
+    if df.empty:
+        return pd.DataFrame(), "The returned candles did not contain usable OHLC prices."
+
+    return df, None
 
 cache_key = (symbol_clean, period, config["yf"])
 if refresh or "market_data" not in st.session_state or st.session_state.get("loaded_key") != cache_key:
-    try:
-        with st.spinner(f"Loading recent {interval_label.lower()} candles for {symbol_clean}..."):
-            st.session_state.market_data = load_data(symbol_clean, period, config["yf"])
-            st.session_state.loaded_key = cache_key
-    except Exception as exc:
-        st.error(f"Could not load market data: {exc}")
-        st.stop()
+    with st.spinner(f"Loading recent {interval_label.lower()} candles for {symbol_clean}..."):
+        loaded_data, load_error = load_data(symbol_clean, period, config["yf"])
+        st.session_state.market_data = loaded_data
+        st.session_state.market_data_error = load_error
+        st.session_state.loaded_key = cache_key
 
 data = st.session_state.market_data.copy()
 if data.empty:
-    st.error("No candles were returned. Check the ticker, try a shorter history, or try another interval. Some markets have limited data access.")
+    error_detail = st.session_state.get("market_data_error")
+    st.error("No usable candles were returned.")
+    if error_detail:
+        st.caption(error_detail)
+    st.markdown(
+        "**Try these settings:** ticker `BTC-USD`, interval `1 minute`, "
+        "history `1d`. If that still fails, try interval `5 minutes` and history `5d`. "
+        "Yahoo Finance can temporarily omit intraday data or limit requests."
+    )
     st.stop()
 
 # Candle-by-candle measurements: describe the candle's shape and change, not a trading instruction.
@@ -152,8 +200,8 @@ c.metric("Candles analysed", f"{len(data):,}", help="Each row is one candle in t
 st.caption(f"Data source: Yahoo Finance · Latest candle timestamp: {data.index[-1]} · This is the latest data returned by the provider, not necessarily the current live market price.")
 
 st.divider()
-st.subheader("Recent price and 5–10 minute projection")
-st.write("**Solid line:** observed closing prices. **Dashed line:** a straight-line trend fitted to the latest candles and extended forward. **Shaded band:** a rough uncertainty range that widens with time. It is an estimate, not a promise or a statistically validated confidence interval.")
+st.subheader(f"Recent price and next {steps} {interval_label.lower()} candle projection")
+st.write(f"**Solid line:** observed closing prices. **Dashed line:** a straight-line trend fitted to the latest candles and extended forward by {steps} candles. **Shaded band:** a rough uncertainty range that widens with time. At a 1-minute interval, 5–10 candles represent roughly 5–10 minutes. This is an estimate, not a promise or a statistically validated confidence interval.")
 fig = go.Figure()
 show_n = min(100, len(data))
 visible = data.iloc[-show_n:]
@@ -214,4 +262,4 @@ with st.expander("Summary of patterns in the selected history"):
     else:
         st.write("There are not enough candles to summarise price changes.")
 
-st.caption("This version does not recommend trades or strategies. The forecast is a simple linear extrapolation of recent closes, with a rough uncertainty band. It does not yet use a trained AI model, order-book data, or a guaranteed live exchange feed. Yahoo Finance can delay, omit, or limit intraday data.")
+st.caption("This version does not recommend trades or strategies. The forecast is a simple linear extrapolation of recent closes, with a rough uncertainty band. It does not yet use a trained AI model, order-book data, or a guaranteed live exchange feed. Yahoo Finance can de
