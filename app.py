@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
+from live_feed import get_first_valid_price
 
 st.set_page_config(page_title="Market Pattern Explorer", page_icon="📈", layout="wide")
 st.title("📈 Market Pattern Explorer")
@@ -304,54 +305,39 @@ else:
     def live_market_panel():
         import requests
         try:
-            # Try Binance first, then Kraken. Some cloud hosts/regions receive
-            # HTTP 403/451 from Binance, so don't rely on a single exchange.
-            spot = None
-            provider = None
-            errors = []
-            try:
+            def fetch_kraken_price():
+                kraken_pairs = {
+                    "BTC-USD": "XBTUSD", "ETH-USD": "ETHUSD", "SOL-USD": "SOLUSD",
+                    "BNB-USD": "BNBUSD", "XRP-USD": "XRPUSD", "DOGE-USD": "DOGEUSD"
+                }
+                response = requests.get(
+                    "https://api.kraken.com/0/public/Ticker",
+                    params={"pair": kraken_pairs[symbol_clean]}, timeout=5,
+                    headers={"User-Agent": "Mozilla/5.0 MarketPatternExplorer/1.0"}
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("error"):
+                    raise ValueError("Kraken API returned an error")
+                result = payload.get("result", {})
+                if not result:
+                    raise ValueError("Kraken returned no ticker data")
+                return next(iter(result.values()))["c"][0]
+
+            def fetch_binance_price():
                 response = requests.get(
                     f"https://api.binance.com/api/v3/ticker/price?symbol={live_pair}",
                     timeout=4, headers={"User-Agent": "Mozilla/5.0 MarketPatternExplorer/1.0"}
                 )
                 response.raise_for_status()
-                spot = float(response.json()["price"])
-                provider = "Binance"
-            except Exception as exc:
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                reason = getattr(getattr(exc, "response", None), "reason", None)
-                detail = f"HTTP {status}" + (f" {reason}" if reason else "") if status else f"{type(exc).__name__}: {str(exc)[:120]}"
-                errors.append(f"Binance: {detail}")
+                return response.json()["price"]
 
-            if spot is None:
-                kraken_pairs = {
-                    "BTC-USD": "XBTUSD", "ETH-USD": "ETHUSD", "SOL-USD": "SOLUSD",
-                    "BNB-USD": "BNBUSD", "XRP-USD": "XRPUSD", "DOGE-USD": "DOGEUSD"
-                }
-                kraken_pair = kraken_pairs.get(symbol_clean)
-                if kraken_pair:
-                    try:
-                        response = requests.get(
-                            "https://api.kraken.com/0/public/Ticker",
-                            params={"pair": kraken_pair}, timeout=5,
-                            headers={"User-Agent": "Mozilla/5.0 MarketPatternExplorer/1.0"}
-                        )
-                        response.raise_for_status()
-                        payload = response.json()
-                        if payload.get("error"):
-                            raise ValueError("Kraken API returned an error")
-                        result = payload.get("result", {})
-                        if not result:
-                            raise ValueError("Kraken returned no ticker data")
-                        spot = float(next(iter(result.values()))["c"][0])
-                        provider = "Kraken"
-                    except Exception as exc:
-                        status = getattr(getattr(exc, "response", None), "status_code", None)
-                        reason = getattr(getattr(exc, "response", None), "reason", None)
-                        detail = f"HTTP {status}" + (f" {reason}" if reason else "") if status else f"{type(exc).__name__}: {str(exc)[:120]}"
-                        errors.append(f"Kraken: {detail}")
-            if spot is None:
-                raise RuntimeError("Both live providers failed (" + ("; ".join(errors) or "no price returned") + ").")
+            # Kraken is first because it is currently reachable from Streamlit Cloud;
+            # Binance remains as a fallback if Kraken is unavailable.
+            spot, provider, errors = get_first_valid_price([
+                ("Kraken", fetch_kraken_price),
+                ("Binance", fetch_binance_price),
+            ])
             now = pd.Timestamp.now(tz="UTC")
             key = f"live_samples_{live_pair}"
             samples = st.session_state.get(key, [])
