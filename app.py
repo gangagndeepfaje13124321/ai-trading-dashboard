@@ -190,7 +190,7 @@ if not np.isnan(rsi_now):
 # Main chart is a genuine OHLC candlestick chart, with moving averages.
 st.divider()
 st.subheader(f"Candlestick chart — {interval_label}")
-st.caption("Each candle shows Open, High, Low and Close. EMA20 and EMA50 are smoothed average-price lines used to help describe trend direction.")
+st.caption("Each candle shows Open, High, Low and Close. EMA20 = average-like line that responds to the last 20 candles; EMA50 responds more slowly to the last 50. They are context, not predictions. Use the toolbar to box-zoom, double-click to reset, and the mouse wheel to zoom.")
 fig = go.Figure()
 fig.add_trace(go.Candlestick(
     x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"],
@@ -200,7 +200,7 @@ fig.add_trace(go.Scatter(x=data.index, y=data["EMA20"], name="EMA20", line=dict(
 fig.add_trace(go.Scatter(x=data.index, y=data["EMA50"], name="EMA50", line=dict(width=1.5, color="#42a5f5")))
 fig.update_layout(template="plotly_dark", height=600, xaxis_title="Time", yaxis_title="Price",
                   xaxis_rangeslider_visible=False, hovermode="x unified", legend=dict(orientation="h", y=1.02))
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToAdd": ["drawline", "drawrect", "eraseshape"]}, key="history_candles")
 
 # Full-history pattern table: every candle gets simple descriptive labels.
 def candle_label(row):
@@ -268,7 +268,7 @@ proj_fig.add_trace(go.Scatter(x=future_times, y=projected - spread, mode="lines"
     fill="tonexty", fillcolor="rgba(100,149,237,0.18)", name="Observed-variability band", hoverinfo="skip"))
 proj_fig.update_layout(template="plotly_dark", height=520, xaxis_title="Time", yaxis_title="Price",
     xaxis_rangeslider_visible=False, hovermode="x unified")
-st.plotly_chart(proj_fig, use_container_width=True)
+st.plotly_chart(proj_fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False}, key="historical_projection")
 
 projected_change = ((float(projected[-1]) / latest) - 1) * 100 if latest else 0
 if projected_change > 0.05:
@@ -280,3 +280,135 @@ else:
 st.write(f"**Baseline reading:** the simple fitted trend points {projected_direction} over the next {projection_steps * config['minutes']} minutes ({projected_change:+.3f}% from the latest close).")
 st.write("**What could change this reading:** a move back across EMA20/EMA50, a new swing high/low, or a sharp increase in candle range. The projection does not know future news or order-book changes.")
 st.caption("This dashboard describes historical price behaviour. It does not provide buy/sell signals, does not use a trained AI model or order-book data, and cannot guarantee a forecast. More historical candles improve context, but do not remove market uncertainty.")
+
+
+# Live sampled price and projection. This is deliberately separate from Yahoo historical candles.
+# Binance's public ticker endpoint gives current spot price, not native one-second OHLC candles.
+st.divider()
+st.subheader("Live spot tracker + rolling short-range projection")
+st.caption(
+    "For BTC/ETH/SOL this samples Binance's public spot price every 2 seconds and builds a live display. "
+    "These are sampled observations, not official one-second candles. The yellow line is a rolling baseline "
+    "from recent Yahoo candles; the blue line is the same baseline shifted by live price movement. "
+    "No forecast can reliably know the next move."
+)
+
+live_symbol_map = {
+    "BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT", "SOL-USD": "SOLUSDT",
+    "BNB-USD": "BNBUSDT", "XRP-USD": "XRPUSDT", "DOGE-USD": "DOGEUSDT"
+}
+live_pair = live_symbol_map.get(symbol_clean)
+if not live_pair:
+    st.info("Live second-by-second sampling currently supports BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD and DOGE-USD. Other tickers still use the historical chart above.")
+else:
+    @st.fragment(run_every="2s")
+    def live_market_panel():
+        import requests
+        from datetime import timezone
+        try:
+            response = requests.get(
+                f"https://api.binance.com/api/v3/ticker/price?symbol={live_pair}",
+                timeout=4
+            )
+            response.raise_for_status()
+            spot = float(response.json()["price"])
+            now = pd.Timestamp.now(tz="UTC")
+            key = f"live_samples_{live_pair}"
+            samples = st.session_state.get(key, [])
+            samples.append({"time": now, "price": spot})
+            samples = samples[-180:]
+            st.session_state[key] = samples
+            st.metric("Live sampled spot price", f"{spot:,.6f}", help="Current Binance spot quote, polled every ~2 seconds.")
+            live_df = pd.DataFrame(samples)
+            if len(live_df) >= 2:
+                # Calculate the recent historical baseline's direction, then anchor it to live price.
+                base_close = close.tail(min(60, len(close))).to_numpy(dtype=float)
+                bx = np.arange(len(base_close), dtype=float)
+                bslope = np.polyfit(bx, base_close, 1)[0] if len(base_close) >= 3 else 0.0
+                # Forecast horizon is 10 minutes, represented as 2-second steps.
+                n_steps = 300
+                last_time = live_df["time"].iloc[-1]
+                future_t = [last_time + pd.Timedelta(seconds=2 * i) for i in range(1, n_steps + 1)]
+                hist_t = live_df["time"].tolist()
+                hist_p = live_df["price"].astype(float).tolist()
+                # Drift is deliberately damped: short history is not a reliable predictor.
+                hist_move = (hist_p[-1] / hist_p[0] - 1) if hist_p[0] else 0.0
+                drift_per_step = np.clip(hist_move / max(len(hist_p) - 1, 1), -0.00002, 0.00002)
+                horizon_steps = np.arange(1, n_steps + 1)
+                # Tiny baseline drift from recent candles, damped to avoid pretending confidence.
+                baseline_drift = np.clip((bslope / max(abs(latest), 1e-12)) / max(config["minutes"] * 30, 1), -0.00001, 0.00001)
+                pred = spot * (1 + (drift_per_step * 0.35 + baseline_drift * 0.25) * horizon_steps)
+                # Band grows with horizon and sampled volatility.
+                changes = pd.Series(hist_p).pct_change().dropna()
+                vol = float(changes.std()) if len(changes) > 2 and np.isfinite(changes.std()) else 0.00005
+                width = spot * max(vol, 0.00003) * np.sqrt(horizon_steps) * 1.5
+                live_fig = go.Figure()
+                live_fig.add_trace(go.Scatter(x=hist_t, y=hist_p, mode="lines", name="Live sampled price", line=dict(width=2, color="#26a69a")))
+                live_fig.add_trace(go.Scatter(x=future_t, y=pred, mode="lines", name="Rolling baseline", line=dict(width=2, dash="dash", color="#f5c542")))
+                live_fig.add_trace(go.Scatter(x=future_t, y=pred + width, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+                live_fig.add_trace(go.Scatter(x=future_t, y=pred - width, mode="lines", line=dict(width=0), fill="tonexty", fillcolor="rgba(100,149,237,0.18)", name="Uncertainty range", hoverinfo="skip"))
+                live_fig.update_layout(template="plotly_dark", height=430, hovermode="x unified",
+                    xaxis_title="Time (UTC)", yaxis_title="Price", margin=dict(l=10,r=10,t=35,b=10))
+                st.plotly_chart(live_fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False}, key=f"live_chart_{live_pair}")
+                st.caption(f"Live observations retained in this session: {len(live_df)}. The projection refreshes with the spot price; it is a baseline, not an AI/news-aware forecast.")
+            else:
+                st.info("Collecting live samples. The chart will appear after the next update.")
+        except Exception as exc:
+            st.warning(f"Live spot feed is temporarily unavailable: {type(exc).__name__}. The historical chart above remains available.")
+    live_market_panel()
+
+st.divider()
+st.subheader("Recent news and community discussion")
+st.caption("Headlines and public discussion can provide context, but this simple feed does not measure sentiment reliably and does not alter the price projection. Social platforms may limit access or change feeds.")
+news_col, social_col = st.columns(2)
+
+def load_rss_items(url, limit=6):
+    import requests
+    import xml.etree.ElementTree as ET
+    try:
+        r = requests.get(url, timeout=6, headers={"User-Agent": "MarketPatternExplorer/1.0"})
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.findall(".//item")[:limit]:
+            title = (item.findtext("title") or "Untitled").strip()
+            link = (item.findtext("link") or "").strip()
+            pub = (item.findtext("pubDate") or "").strip()
+            items.append((title, link, pub))
+        return items
+    except Exception:
+        return []
+
+with news_col:
+    st.markdown("**News headlines**")
+    news_query = symbol_clean.replace("-USD", " crypto")
+    news_items = load_rss_items(
+        "https://news.google.com/rss/search?q=" + requests.utils.quote(news_query + " market") +
+        "&hl=en-US&gl=US&ceid=US:en", 6
+    ) if "requests" in globals() else []
+    if not news_items:
+        # requests is imported inside the live fragment, so import explicitly for the RSS fetch.
+        import requests
+        news_items = load_rss_items(
+            "https://news.google.com/rss/search?q=" + requests.utils.quote(news_query + " market") +
+            "&hl=en-US&gl=US&ceid=US:en", 6
+        )
+    if news_items:
+        for title, link, pub in news_items:
+            st.markdown(f"- [{title}]({link})" + (f"  \n  <small>{pub}</small>" if pub else ""), unsafe_allow_html=True)
+    else:
+        st.write("News feed unavailable right now.")
+
+with social_col:
+    st.markdown("**Public Reddit discussions**")
+    import requests
+    social_query = symbol_clean.replace("-USD", "")
+    social_items = load_rss_items(
+        "https://www.reddit.com/search.rss?q=" + requests.utils.quote(social_query + " crypto") +
+        "&sort=new&t=day", 6
+    )
+    if social_items:
+        for title, link, pub in social_items:
+            st.markdown(f"- [{title}]({link})" + (f"  \n  <small>{pub}</small>" if pub else ""), unsafe_allow_html=True)
+    else:
+        st.write("Reddit feed unavailable or rate-limited.")
