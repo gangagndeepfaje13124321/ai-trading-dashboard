@@ -121,6 +121,7 @@ def rolling_origin_backtest(frame, lookback=100, min_train=20, max_origins=500,
         "trend_close_mae": float(np.mean(np.abs(trend_errors))),
         "trend_close_rmse": float(np.sqrt(np.mean(np.square(trend_errors)))),
         "last_close_mae": float(np.mean(np.abs(persistence_errors))),
+        "last_close_rmse": float(np.sqrt(np.mean(np.square(persistence_errors)))),
         "directional_accuracy_pct": float(np.mean(predicted_direction == actual_direction) * 100),
         "ohlc_mae": component_mae,
     }

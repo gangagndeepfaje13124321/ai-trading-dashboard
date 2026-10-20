@@ -276,11 +276,16 @@ st.markdown("**How this baseline performed on later historical candles**")
 if backtest is None:
     st.info("There are not enough historical candles yet for a separate walk-forward test. Load a longer history or use a larger candle interval.")
 else:
-    test_columns = st.columns(4)
+    test_columns = st.columns(5)
     test_columns[0].metric("Trend close MAE", f"{backtest['trend_close_mae']:,.4f}", help="Average absolute close-price miss on the held-out test candles. Lower is better.")
     test_columns[1].metric("Last-close baseline MAE", f"{backtest['last_close_mae']:,.4f}", help="Simple comparison: predict that the next close stays at the latest close.")
-    test_columns[2].metric("Test candles", f"{backtest['holdout_candles']}", help="Final chronological portion of one-step walk-forward predictions.")
-    test_columns[3].metric("Trend direction correct", f"{backtest['directional_accuracy_pct']:.1f}%", help="Share of test candles where the predicted up/down/flat direction matched the next close.")
+    test_columns[2].metric("Trend close RMSE", f"{backtest['trend_close_rmse']:,.4f}", help="Root mean square error. Like MAE, lower is better; it gives extra weight to larger misses.")
+    test_columns[3].metric("Test candles", f"{backtest['holdout_candles']}", help="Final chronological portion of one-step walk-forward predictions.")
+    test_columns[4].metric("Trend direction correct", f"{backtest['directional_accuracy_pct']:.1f}%", help="Share of test candles where the predicted up/down/flat direction matched the next close.")
+    st.caption(
+        "MAE is the average size of the miss. RMSE gives larger misses more weight. "
+        f"Last-close RMSE: {backtest['last_close_rmse']:,.4f}."
+    )
     st.caption(
         "At each test step, the forecast used only candles available before that target candle. "
         f"OHLC average absolute miss (price units): open {backtest['ohlc_mae']['open']:,.4f}, "
@@ -288,16 +293,40 @@ else:
         f"close {backtest['ohlc_mae']['close']:,.4f}. This is historical testing, not a guarantee of future accuracy."
     )
     if backtest["trend_close_mae"] < backtest["last_close_mae"]:
-        st.caption("On this selected history, the trend baseline had a lower close-price error than the last-close comparison.")
+        improvement = (1 - backtest["trend_close_mae"] / backtest["last_close_mae"]) * 100 if backtest["last_close_mae"] > 0 else 0
+        st.caption(f"On this selected history, the trend baseline's average close-price miss was {improvement:.1f}% lower than the last-close comparison.")
+    elif backtest["last_close_mae"] > 0:
+        ratio = backtest["trend_close_mae"] / backtest["last_close_mae"]
+        st.caption(f"On this selected history, the trend baseline's average close-price miss was {ratio:.1f}× the last-close comparison's miss.")
     else:
-        st.caption("On this selected history, the trend baseline did not beat the last-close comparison on close-price error.")
+        st.caption("The last-close comparison had zero average close-price error on these test candles; the trend baseline did not beat it.")
 
 proj_fig = go.Figure()
-visible = data.tail(min(200, len(data)))
+max_visible_candles = min(200, len(data))
+if max_visible_candles > 20:
+    history_options = [count for count in (20, 40, 60, 100, 150, 200) if count < max_visible_candles]
+    history_options.append(max_visible_candles)
+    default_visible_candles = min(60, max_visible_candles)
+    visible_candle_count = st.select_slider(
+        "Recent history shown with the forecast",
+        options=history_options,
+        value=default_visible_candles,
+        format_func=lambda count: f"{count} candles",
+        help="Choose fewer candles to zoom in on the forecast. The full history remains available in the main chart above.",
+    )
+else:
+    visible_candle_count = max_visible_candles
+visible = data.tail(visible_candle_count)
 proj_fig.add_trace(go.Candlestick(
     x=visible.index, open=visible["Open"], high=visible["High"], low=visible["Low"], close=visible["Close"],
-    name="Historical candles", increasing_line_color="#26a69a", decreasing_line_color="#ef5350"
+    name="Historical candles", increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+    legendrank=1,
 ))
+proj_fig.add_trace(go.Scatter(x=future_times, y=projected, mode="lines", name="Trend baseline",
+    line=dict(dash="dash", width=1.5, color="#f5c542"), legendrank=3))
+proj_fig.add_trace(go.Scatter(x=future_times, y=projected + spread, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+proj_fig.add_trace(go.Scatter(x=future_times, y=projected - spread, mode="lines", line=dict(width=0),
+    fill="tonexty", fillcolor="rgba(100,149,237,0.18)", name="Observed-variability band", hoverinfo="skip", legendrank=4))
 proj_fig.add_trace(go.Candlestick(
     x=future_times,
     open=[candle["open"] for candle in forecast_candles],
@@ -306,16 +335,23 @@ proj_fig.add_trace(go.Candlestick(
     close=[candle["close"] for candle in forecast_candles],
     name="Forecast OHLC baseline",
     increasing_line_color="#64b5f6", decreasing_line_color="#ffab91",
-    increasing_fillcolor="rgba(100,181,246,0.55)", decreasing_fillcolor="rgba(255,171,145,0.55)",
+    increasing_fillcolor="rgba(100,181,246,0.7)", decreasing_fillcolor="rgba(255,171,145,0.7)",
+    legendrank=2,
 ))
-proj_fig.add_trace(go.Scatter(x=future_times, y=projected, mode="lines+markers", name="Trend baseline",
-    line=dict(dash="dash", width=2, color="#f5c542")))
-proj_fig.add_trace(go.Scatter(x=future_times, y=projected + spread, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
-proj_fig.add_trace(go.Scatter(x=future_times, y=projected - spread, mode="lines", line=dict(width=0),
-    fill="tonexty", fillcolor="rgba(100,149,237,0.18)", name="Observed-variability band", hoverinfo="skip"))
 proj_fig.update_layout(template="plotly_dark", height=520, xaxis_title="Time", yaxis_title="Price",
-    xaxis_rangeslider_visible=False, hovermode="x unified")
-st.plotly_chart(proj_fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False}, key="historical_projection")
+    xaxis_rangeslider_visible=False, hovermode="x unified",
+    uirevision=f"{symbol_clean}-{config['yf']}-{visible_candle_count}")
+st.caption(f"Showing the last {visible_candle_count} historical candles plus the forecast. Use fewer candles in the selector to zoom in; hover over a forecast candle to inspect its Open, High, Low and Close.")
+st.plotly_chart(
+    proj_fig, use_container_width=True,
+    config={
+        "scrollZoom": True,
+        "displaylogo": False,
+        "doubleClick": "reset",
+        "modeBarButtonsToAdd": ["zoomIn2d", "zoomOut2d", "autoScale2d", "resetScale2d"],
+    },
+    key="historical_projection",
+)
 st.caption("Blue/orange future candles show estimated Open, High, Low and Close. Their open/high/low use simple historical assumptions; the model being tested forecasts Close only. The shaded band is an observed-variation guide, not a probability promise.")
 
 projected_change = ((float(projected[-1]) / latest) - 1) * 100 if latest else 0
