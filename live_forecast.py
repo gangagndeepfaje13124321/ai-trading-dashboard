@@ -257,7 +257,11 @@ def _momentum_direction(rows, horizon_seconds):
     if len(rows) < 2:
         return 0
     latest = rows[-1]
-    cutoff = latest["time"] - timedelta(seconds=horizon_seconds)
+    # Long scenarios use a capped recent lookback. We still need enough data
+    # to form a short-term bias, but do not label 120 seconds of history when
+    # only a few recent seconds have actually arrived.
+    lookback_seconds = min(max(1, int(horizon_seconds)), 30)
+    cutoff = latest["time"] - timedelta(seconds=lookback_seconds)
     recent = [row for row in rows if row["time"] >= cutoff]
     if len(recent) < 2:
         return 0
@@ -272,7 +276,7 @@ def _momentum_direction(rows, horizon_seconds):
 
 
 def make_live_forecast(candles, horizon_seconds=DEFAULT_HORIZON_SECONDS):
-    """Make a small OHLC path from the same recent one-second trade candles."""
+    """Make a transparent linear OHLC scenario from recent trade-second bars."""
     rows = _clean_candles(candles)
     if not rows:
         return None
@@ -281,24 +285,35 @@ def make_live_forecast(candles, horizon_seconds=DEFAULT_HORIZON_SECONDS):
     setup = _setup(rows)
     direction = setup["direction"] or _momentum_direction(rows, horizon_seconds)
     method = setup["method"] if setup["direction"] else ("momentum" if direction else "none")
-    closes = [row["close"] for row in rows[-20:]]
+    closes = [row["close"] for row in rows[-31:]]
     changes = [abs(current - previous) for previous, current in zip(closes, closes[1:])]
     typical_step = _median([change for change in changes if change > 0])
     typical_range = _median([row["high"] - row["low"] for row in rows[-20:]])
     if typical_step <= 0:
         typical_step = typical_range * 0.25
-    typical_wick = max(typical_range * 0.2, rows[-1]["close"] * 0.000001)
+
+    lookback = rows[-min(31, len(rows)):]
+    elapsed = max(1.0, (lookback[-1]["time"] - lookback[0]["time"]).total_seconds())
+    observed_rate = (lookback[-1]["close"] - lookback[0]["close"]) / elapsed
+    drift_per_second = min(abs(observed_rate), typical_step * 0.5)
+    if direction and drift_per_second <= 0:
+        drift_per_second = typical_step * 0.15
+    typical_wick = max(typical_range * 0.15, typical_step * 0.25, rows[-1]["close"] * 0.000001)
 
     entry_price = rows[-1]["close"]
     previous_close = entry_price
     forecast_candles = []
     for step in range(1, horizon_seconds + 1):
-        predicted_close = entry_price + direction * typical_step * math.sqrt(step)
+        # A straight scenario path is easier to compare with actual OHLC bars.
+        # It is still only an extrapolation; no second-level historical fit is
+        # available to calibrate this movement or its widening wick range.
+        predicted_close = entry_price + direction * drift_per_second * step
+        scenario_wick = typical_wick * math.sqrt(step)
         forecast_candles.append({
             "time": rows[-1]["time"] + timedelta(seconds=step),
             "open": previous_close,
-            "high": max(previous_close, predicted_close) + typical_wick,
-            "low": min(previous_close, predicted_close) - typical_wick,
+            "high": max(previous_close, predicted_close) + scenario_wick,
+            "low": min(previous_close, predicted_close) - scenario_wick,
             "close": predicted_close,
         })
         previous_close = predicted_close
@@ -313,8 +328,8 @@ def make_live_forecast(candles, horizon_seconds=DEFAULT_HORIZON_SECONDS):
         reason = "A recent price range broke; this is tracked separately from classic chart patterns."
     elif direction:
         reason = (
-            "No confirmed pattern breakout; the direction uses recent "
-            f"{horizon_seconds}-second price movement."
+            "No confirmed pattern breakout; recent short-term movement is used "
+            f"for a {horizon_seconds}-second scenario."
         )
     else:
         reason = "No confirmed pattern breakout or clear short-term momentum."
