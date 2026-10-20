@@ -10,7 +10,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from alpaca_market import AlpacaTradeFeed, fetch_alpaca_minute_history
-from live_forecast import LiveForecastEvaluator, make_live_forecast
+from live_forecast import LiveForecastEvaluator, make_live_forecast, make_pattern_overlay
 from market_history import fetch_kraken_minute_history, merge_history_with_live_trades
 from strategy_lab import fit_and_evaluate, make_minute_forecast
 from trade_candles import KrakenTradeFeed
@@ -142,8 +142,8 @@ def _help_heading(label, explanation):
             st.write(explanation)
 
 
-def _second_figure(candles, name, asset_label, height=500):
-    """Plot only real trades grouped into one-second OHLC candles."""
+def _second_figure(candles, name, asset_label, overlay=None, height=500):
+    """Plot real one-second trade candles with clearly labeled pattern guides."""
     fig = go.Figure()
     recent = candles[-120:]
     if recent:
@@ -162,6 +162,18 @@ def _second_figure(candles, name, asset_label, height=500):
             decreasing_fillcolor="rgba(255,91,100,.62)",
         ))
 
+    for line in (overlay or {}).get("lines", []):
+        fig.add_trace(go.Scatter(
+            x=line["x"],
+            y=line["y"],
+            mode="lines",
+            name=line["name"],
+            line=dict(color=line["color"], width=2 if line["dash"] == "solid" else 1.5,
+                      dash=line["dash"]),
+            hovertemplate=f"{line['name']}<br>%{{y:.6g}}<extra></extra>",
+            connectgaps=True,
+        ))
+
     fig.update_layout(
         template="plotly_dark",
         height=height,
@@ -171,12 +183,57 @@ def _second_figure(candles, name, asset_label, height=500):
         xaxis_rangeslider_visible=False,
         hovermode="x unified",
         uirevision=name,
-        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=10)),
+        legend=dict(orientation="h", y=1.02, x=0, font=dict(size=9)),
         showlegend=True,
     )
     fig.update_xaxes(showgrid=False, tickformat="%H:%M:%S\n%b %d")
     fig.update_yaxes(fixedrange=False, tickformat=".6~g", gridcolor="rgba(150,160,180,.18)")
     return fig
+
+
+def _history_test_charts(holdout):
+    """Build two compact views of later-period directional and price errors."""
+    hit_rate = holdout.get("directional_accuracy_pct")
+    direction = go.Figure()
+    if hit_rate is not None:
+        direction.add_trace(go.Bar(
+            x=[hit_rate, 50],
+            y=["Selected rule", "50% reference"],
+            orientation="h",
+            marker_color=["#39c8c2", "#697386"],
+            text=[f"{hit_rate:.1f}%", "50%"],
+            textposition="outside",
+            hovertemplate="%{y}: %{x:.1f}%<extra></extra>",
+        ))
+    direction.update_layout(
+        template="plotly_dark", height=210, margin=dict(l=8, r=30, t=12, b=20),
+        title="How often direction matched", showlegend=False,
+        xaxis=dict(title="Correct direction (%)", range=[0, 100], gridcolor="rgba(150,160,180,.16)"),
+        yaxis=dict(autorange="reversed"), bargap=.45,
+    )
+
+    model_error = holdout.get("forecast_mae_pct")
+    unchanged_error = holdout.get("last_close_mae_on_calls_pct")
+    errors = go.Figure()
+    error_rows = [("Selected rule", model_error), ("Assume no price change", unchanged_error)]
+    error_rows = [(label, value) for label, value in error_rows if value is not None]
+    if error_rows:
+        errors.add_trace(go.Bar(
+            x=[row[1] for row in error_rows],
+            y=[row[0] for row in error_rows],
+            orientation="h",
+            marker_color=["#ffb454", "#697386"][:len(error_rows)],
+            text=[f"{row[1]:.4f}%" for row in error_rows],
+            textposition="outside",
+            hovertemplate="%{y}: %{x:.4f}% average error<extra></extra>",
+        ))
+    errors.update_layout(
+        template="plotly_dark", height=210, margin=dict(l=8, r=30, t=12, b=20),
+        title="Average close-price miss (lower is better)", showlegend=False,
+        xaxis=dict(title="Average error (%)", rangemode="tozero", gridcolor="rgba(150,160,180,.16)"),
+        yaxis=dict(autorange="reversed"), bargap=.45,
+    )
+    return direction, errors
 
 
 header, market_picker, horizon_picker = st.columns([1.8, 1.4, 1.1], vertical_alignment="center")
@@ -285,16 +342,16 @@ def live_summary():
         metrics[3].metric("Pattern outcomes", "No completed tests",
                           help="The app has not yet collected enough later trades to score a confirmed pattern rule.")
     st.caption(
-        "Right chart contains real trade-based one-second candles only. The old glowing forecast path was removed because it was an untested extrapolation. "
-        "Second-level history is not available to this app yet, so no forecast path or buy/sell claim is shown."
+        "The right chart keeps actual one-second trade candles and overlays recent swing-high/resistance and swing-low/support lines. "
+        "Dashed parts extend those observed pattern boundaries for context; they are not predicted prices or buy/sell signals."
     )
 
 
 live_summary()
 
 _help_heading(
-    "What the minute-history test found",
-    "Four simple rules are compared using earlier data, the best one is selected without looking at the test period, and its performance is reported on later candles that were kept aside. These results cover one-minute bars only; they do not validate a one-second setup.",
+    "Minute-history check · one-minute candles",
+    "The app compares four simple rules on older one-minute candles, picks one using only the first 70%, and checks it on the later 30%. This is a small historical experiment, not a trained AI or proof that one-second trades work.",
 )
 if is_stock and not (api_key and secret_key):
     st.caption("Add Alpaca credentials in Streamlit Cloud Secrets to run this test on Apple or Tesla history. The TradingView chart works without them.")
@@ -324,6 +381,16 @@ else:
                           help="MAE is average forecast error. Smaller is better; the second number is the error from simply assuming no price change.")
     test_metrics[3].metric("1-minute result", minute_signal,
                           help="WATCH appears only if there are at least 30 later test calls, at least 55% direction matches, and close error beats the unchanged-price baseline.")
+    if accuracy is None or calls == 0:
+        st.info("The held-back part of history did not contain enough directional calls to measure whether the chosen rule was right more often than a simple reference.")
+    else:
+        direction_comparison = "above" if accuracy > 50 else "at or below"
+        st.info(
+            f"Plain English: on {calls} later one-minute examples the selected rule guessed the direction correctly "
+            f"{accuracy:.1f}% of the time ({direction_comparison} a 50% reference). "
+            "Its average close-price miss is compared with simply assuming the price would not change. "
+            "These results do not test the one-second chart and do not include trading costs."
+        )
     if minute_forecast:
         scenario = {1: "up", -1: "down", 0: "no passing direction"}[minute_forecast["scenario_direction"]]
         if minute_forecast["signal_validated"] and minute_forecast["direction"]:
@@ -341,37 +408,49 @@ else:
         momentum_error_text = f"{momentum_error:.5f}%" if momentum_error is not None else "not available"
         st.write(f"On that held-back period, the rule made {calls} directional calls across {holdout.get('origins', 0)} possible test points. It matched {accuracy_text} of directions. Close MAE was {model_error_text}; the unchanged-price baseline was {baseline_error_text}; momentum baseline MAE was {momentum_error_text}.")
         st.write("This is a single recent chronological holdout, not a guarantee. The test does not include fees, spread, slippage, or real order fills.")
+    with st.expander("See the test results as charts", expanded=False):
+        st.caption("Left: direction matches compared with a 50% reference. Right: average close-price error for the rule and a no-change baseline; shorter bars are better.")
+        direction_fig, error_fig = _history_test_charts(holdout)
+        visual_left, visual_right = st.columns(2, gap="small")
+        with visual_left:
+            st.plotly_chart(direction_fig, use_container_width=True, config={"displaylogo": False}, key="minute-test-direction")
+        with visual_right:
+            st.plotly_chart(error_fig, use_container_width=True, config={"displaylogo": False}, key="minute-test-error")
 
-left, right = st.columns(2, gap="small")
+left, right = st.columns([1.25, 1], gap="small")
 with left:
     _help_heading(
         f"TradingView · {asset_label} · 1-minute chart",
         "This is TradingView's hosted chart, with its normal timeframe, zoom, indicators, and drawing tools. The market selector above changes the ticker. The hosted widget cannot receive a custom forecast overlay from this app, so the model result is explained below the chart.",
     )
-    _tradingview_chart(asset["tv"], height=500)
+    _tradingview_chart(asset["tv"], height=575)
     st.caption("TradingView chart and exchange feed are provided by TradingView. A custom model drawing cannot be injected into this hosted widget.")
 
 with right:
     _help_heading(
         f"Live {provider_label} · actual 1-second candles",
-        "Each bar groups real received trades by their exchange timestamp second. Seconds with no trade are omitted. The plot updates every second while the feed is active. No invented forecast bars are drawn.",
+        "Each candle groups real trades by exchange-time second; seconds with no trade are omitted. Solid amber and teal lines follow recent swing highs and lows. Their dashed extensions continue those observed boundaries for 30 seconds so a forming shape is visible. They are pattern guides, not a price forecast.",
     )
 
     @st.fragment(run_every="1s")
     def live_second_chart():
         if feed is None:
-            st.info("To activate AAPL/TSLA one-second candles, add ALPACA_API_KEY and ALPACA_SECRET_KEY as Streamlit Cloud Secrets. Do not put those values in GitHub or send them in chat.")
+            st.info("Apple/Tesla chart data comes from TradingView, but this app's own live trades and history need Alpaca keys. In Streamlit Cloud, open this app's Settings/Manage app → Secrets and add ALPACA_API_KEY and ALPACA_SECRET_KEY. Never put the values in GitHub or chat.")
             return
         snapshot = feed.snapshot()
         rows = snapshot.get("candles", [])
         if rows:
+            overlay = make_pattern_overlay(rows, projection_seconds=30)
             st.plotly_chart(
-                _second_figure(rows, name=f"second-candles-{pair}", asset_label=provider_label, height=480),
+                _second_figure(rows, name=f"second-candles-{pair}", asset_label=provider_label,
+                               overlay=overlay, height=500),
                 use_container_width=True,
                 config={"scrollZoom": True, "displaylogo": False},
                 key=f"second-candles-{pair}",
             )
-            st.caption(f"Showing the latest {min(120, len(rows))} seconds that had at least one actual trade. This feed keeps a short rolling window in memory; it does not load old one-second trade history.")
+            pattern_name = overlay["pattern"] if overlay else "Pattern scan waiting"
+            pattern_state = overlay["state"] if overlay else "waiting for candles"
+            st.caption(f"Pattern scan: **{pattern_name} · {pattern_state}**. The chart shows up to 120 recent trade-containing seconds. Solid lines trace swing boundaries; dashed lines extend them 30 seconds. This app does not load archived one-second candles, so these are live pattern guides, not a historically tested price forecast.")
         elif snapshot.get("status") == "unavailable":
             st.error(f"{provider_label} feed unavailable: {snapshot.get('detail', 'Check the data provider settings.')}")
         else:
