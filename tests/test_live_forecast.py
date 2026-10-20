@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from live_forecast import LiveForecastEvaluator, make_live_forecast
+from live_forecast import LiveForecastEvaluator, make_live_forecast, make_pattern_overlay
 
 
 START = datetime(2026, 10, 20, 7, 30, tzinfo=timezone.utc)
@@ -20,6 +20,25 @@ def candle(second, open_price, high, low, close):
 
 
 class LiveForecastTests(unittest.TestCase):
+    def test_pattern_overlay_draws_swing_boundaries_and_projects_them(self):
+        history = []
+        peak_indices = {2, 8, 14, 20, 26}
+        troughs = {5: 99.0, 11: 99.3, 17: 99.6, 23: 99.9}
+        for index in range(30):
+            high = 101.0 if index in peak_indices else 100.2
+            low = troughs.get(index, 99.95)
+            history.append(candle(index, 100.0, high, low, 100.0))
+        history.append(candle(30, 100.0, 100.2, 99.95, 100.0))
+
+        overlay = make_pattern_overlay(history, projection_seconds=30)
+
+        self.assertEqual(overlay["pattern"], "Ascending triangle")
+        resistance = next(line for line in overlay["lines"] if line["name"] == "Resistance · next 30s guide")
+        support = next(line for line in overlay["lines"] if line["name"] == "Support · next 30s guide")
+        self.assertEqual(resistance["dash"], "dash")
+        self.assertEqual(resistance["x"][-1], history[-1]["time"] + timedelta(seconds=30))
+        self.assertGreater(support["y"][-1], support["y"][0])
+
     def test_flat_market_makes_neutral_ohlc_scenarios(self):
         history = [candle(i, 100, 100, 100, 100) for i in range(20)]
 

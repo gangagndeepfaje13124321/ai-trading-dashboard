@@ -253,6 +253,127 @@ def _setup(rows):
     return neutral
 
 
+def _fit_line(points):
+    """Fit y = slope*x + intercept to (x, y) turning points."""
+    if not points:
+        return 0.0, 0.0
+    mean_x = sum(point[0] for point in points) / len(points)
+    mean_y = sum(point[1] for point in points) / len(points)
+    denominator = sum((point[0] - mean_x) ** 2 for point in points)
+    if denominator <= 0:
+        return 0.0, mean_y
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in points) / denominator
+    return slope, mean_y - slope * mean_x
+
+
+def make_pattern_overlay(candles, projection_seconds=30):
+    """Describe recent swing boundaries for a live chart overlay.
+
+    The returned lines visualize observed highs/lows and extend those lines for
+    context. They are not forecast prices, trading signals, or calibrated
+    probabilities. A neckline is added for detected top/bottom reversal shapes.
+    """
+    rows = _clean_candles(candles)
+    if not rows:
+        return None
+
+    current = rows[-1]
+    history = rows[-41:-1] or rows[-1:]
+    setup = _setup(rows)
+    start_time = history[0]["time"]
+    current_time = current["time"]
+    projection_end = current_time + timedelta(seconds=max(1, int(projection_seconds)))
+
+    def seconds_from_start(timestamp):
+        return (timestamp - start_time).total_seconds()
+
+    high_values = [row["high"] for row in history]
+    low_values = [row["low"] for row in history]
+    high_pivots = _swing_points(high_values, "high")[-4:]
+    low_pivots = _swing_points(low_values, "low")[-4:]
+
+    def boundary(kind, values, pivots, color):
+        if len(pivots) >= 2:
+            points = [
+                (seconds_from_start(history[index]["time"]), price)
+                for index, price in pivots
+            ]
+            slope, intercept = _fit_line(points)
+            label = f"{kind} · swing trendline"
+        else:
+            level = max(values) if kind == "Resistance" else min(values)
+            slope, intercept = 0.0, level
+            label = f"{kind} · recent level"
+
+        def price_at(timestamp):
+            return slope * seconds_from_start(timestamp) + intercept
+
+        return [
+            {
+                "name": label,
+                "x": [start_time, current_time],
+                "y": [price_at(start_time), price_at(current_time)],
+                "color": color,
+                "dash": "solid",
+            },
+            {
+                "name": f"{kind} · next {max(1, int(projection_seconds))}s guide",
+                "x": [current_time, projection_end],
+                "y": [price_at(current_time), price_at(projection_end)],
+                "color": color,
+                "dash": "dash",
+            },
+        ]
+
+    lines = boundary("Resistance", high_values, high_pivots, "#ffb454")
+    lines.extend(boundary("Support", low_values, low_pivots, "#39c8c2"))
+
+    pattern = setup["name"] or "Recent range"
+    if setup["name"] is None and len(rows) < 16:
+        state = "need more candles for a named pattern"
+    elif setup["name"] is None:
+        state = "no named pattern; showing recent boundaries"
+    else:
+        state = setup["state"]
+
+    name = (setup["name"] or "").lower()
+    if name in {"head and shoulders", "double top", "triple top"}:
+        pivots = _swing_points(high_values, "high")
+        pivots = pivots[-(3 if name != "double top" else 2):]
+        if len(pivots) >= 2:
+            first, last = pivots[0][0], pivots[-1][0]
+            neckline = min(low_values[first:last + 1])
+            label = "Neckline · downward break check"
+            lines.append({
+                "name": label,
+                "x": [start_time, projection_end],
+                "y": [neckline, neckline],
+                "color": "#c18cff",
+                "dash": "dot",
+            })
+    elif name in {"inverse head and shoulders", "double bottom", "triple bottom"}:
+        pivots = _swing_points(low_values, "low")
+        pivots = pivots[-(3 if name != "double bottom" else 2):]
+        if len(pivots) >= 2:
+            first, last = pivots[0][0], pivots[-1][0]
+            neckline = max(high_values[first:last + 1])
+            label = "Neckline · upward break check"
+            lines.append({
+                "name": label,
+                "x": [start_time, projection_end],
+                "y": [neckline, neckline],
+                "color": "#c18cff",
+                "dash": "dot",
+            })
+
+    return {
+        "pattern": pattern,
+        "state": state,
+        "projection_seconds": max(1, int(projection_seconds)),
+        "lines": lines,
+    }
+
+
 def _momentum_direction(rows, horizon_seconds):
     if len(rows) < 2:
         return 0
