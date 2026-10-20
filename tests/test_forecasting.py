@@ -56,6 +56,8 @@ class RollingOriginBacktestTests(unittest.TestCase):
         self.assertEqual(result["holdout_candles"], 8)
         self.assertAlmostEqual(result["trend_close_mae"], 0.0, places=10)
         self.assertGreater(result["last_close_mae"], 0.0)
+        self.assertAlmostEqual(result["trend_close_rmse"], 0.0, places=10)
+        self.assertAlmostEqual(result["last_close_rmse"], 1.0, places=10)
         self.assertEqual(result["directional_accuracy_pct"], 100.0)
         self.assertAlmostEqual(result["ohlc_mae"]["open"], 0.0, places=10)
         self.assertAlmostEqual(result["ohlc_mae"]["high"], 0.0, places=10)
