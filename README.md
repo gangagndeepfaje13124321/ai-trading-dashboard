@@ -12,9 +12,11 @@ A Streamlit market dashboard with TradingView charts, real trade-based one-secon
 - The minute experiment is not a second-by-second forecast. One-second history is not loaded, so the app does not draw invented forecast candles or label an untested one-second guess as a trade signal. Any brief live score is in-memory and resets when the Streamlit process restarts.
 - No model guarantees profit. The evaluation does not include fees, bid/ask spread, slippage, or whether an order could be filled.
 
-## Enable Apple and Tesla data
+## Optional: Enable Apple and Tesla live trade data
 
-Create Alpaca market-data API keys in your Alpaca account, then add them to the app's **Streamlit Community Cloud → App settings → Secrets** area. Use TOML syntax:
+Apple and Tesla can be viewed in the TradingView chart without an API key. Keys are only needed if you also want this app's own live stock trades and historical stock test. Without them, those panels stay unavailable rather than showing invented data.
+
+To enable those optional panels, create Alpaca market-data API keys in your Alpaca account, then add them to the app's **Streamlit Community Cloud → App settings → Secrets** area. Use TOML syntax:
 
 ```toml
 ALPACA_API_KEY = "your-key"

@@ -354,7 +354,7 @@ _help_heading(
     "The app compares four simple rules on older one-minute candles, picks one using only the first 70%, and checks it on the later 30%. This is a small historical experiment, not a trained AI or proof that one-second trades work.",
 )
 if is_stock and not (api_key and secret_key):
-    st.caption("Add Alpaca credentials in Streamlit Cloud Secrets to run this test on Apple or Tesla history. The TradingView chart works without them.")
+    st.caption("No key is needed to view Apple or Tesla on the TradingView chart. The separate stock-history test is simply unavailable until a data provider is connected; crypto history testing works without stock credentials.")
 elif history_error:
     st.warning(f"Could not load {provider_label} minute history: {history_error}")
 elif not fitted.get("ready"):
@@ -435,7 +435,7 @@ with right:
     @st.fragment(run_every="1s")
     def live_second_chart():
         if feed is None:
-            st.info("Apple/Tesla chart data comes from TradingView, but this app's own live trades and history need Alpaca keys. In Streamlit Cloud, open this app's Settings/Manage app → Secrets and add ALPACA_API_KEY and ALPACA_SECRET_KEY. Never put the values in GitHub or chat.")
+            st.info("No key is needed to use Apple/Tesla on the TradingView chart. This right-hand panel needs authenticated stock-trade data to build genuine one-second candles, so it is unavailable without provider credentials. It will not invent stock candles. For live second-by-second candles with no setup, choose a Kraken crypto market.")
             return
         snapshot = feed.snapshot()
         rows = snapshot.get("candles", [])
