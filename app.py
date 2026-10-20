@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from datetime import datetime
 from live_feed import get_first_valid_price
 from trade_candles import KrakenTradeFeed
+from forecasting import build_forecast_candles, linear_trend_forecast, rolling_origin_backtest
 
 st.set_page_config(page_title="Market Pattern Explorer", page_icon="📈", layout="wide")
 st.title("📈 Market Pattern Explorer")
@@ -245,11 +246,10 @@ cols = ["Open","High","Low","Close","Volume","Change %","Body %","Range %",
 cols = [c for c in cols if c in table.columns]
 st.dataframe(table[cols].style.format(precision=4, na_rep="—"), use_container_width=True, height=420)
 
-# Short projection: regression across recent candles, with residual/ATR-based band.
-# The band is not forced narrow: it reflects observed variability.
+# Short projection: a transparent linear-trend baseline, checked against later candles.
 st.divider()
-st.subheader("Short-range projection")
-st.caption("The projection is a statistical baseline based on recent closes. The shaded area uses recent forecast errors and ATR to communicate uncertainty; it is not a calibrated probability interval.")
+st.subheader("Short-range baseline forecast")
+st.caption("This is a simple line fitted to recent closes, not a trained AI model. Forecast OHLC high/low values use typical recent candle wicks. The shaded range estimates uncertainty from recent variation; it is not a calibrated probability interval.")
 max_projection = 10
 projection_steps = min(max_projection, max(5, 10 // max(config["minutes"], 1)))
 lookback = min(100, len(close))
@@ -258,18 +258,55 @@ x = np.arange(lookback, dtype=float)
 slope, intercept = np.polyfit(x, recent, 1) if lookback >= 3 else (0.0, latest)
 fitted = slope * x + intercept
 resid_sd = float(np.std(recent - fitted, ddof=1)) if lookback > 3 else atr_now
-future_x = np.arange(lookback, lookback + projection_steps)
-projected = slope * future_x + intercept
+projected = np.asarray(
+    linear_trend_forecast(close.to_numpy(dtype=float), steps=projection_steps, lookback=lookback),
+    dtype=float,
+)
+forecast_candles = build_forecast_candles(data, projected, lookback=lookback)
 step_sd = float(data["Change"].tail(lookback).dropna().std()) if len(data["Change"].tail(lookback).dropna()) > 2 else atr_now
 base_uncertainty = max(resid_sd, atr_now, step_sd if np.isfinite(step_sd) else 0, latest * 0.0001)
 spread = np.sqrt(np.arange(1, projection_steps + 1)) * base_uncertainty
 step_delta = pd.Timedelta(minutes=config["minutes"])
 future_times = [data.index[-1] + step_delta * i for i in range(1, projection_steps + 1)]
+
+backtest = rolling_origin_backtest(
+    data.loc[:, ["Open", "High", "Low", "Close"]], lookback=lookback
+)
+st.markdown("**How this baseline performed on later historical candles**")
+if backtest is None:
+    st.info("There are not enough historical candles yet for a separate walk-forward test. Load a longer history or use a larger candle interval.")
+else:
+    test_columns = st.columns(4)
+    test_columns[0].metric("Trend close MAE", f"{backtest['trend_close_mae']:,.4f}", help="Average absolute close-price miss on the held-out test candles. Lower is better.")
+    test_columns[1].metric("Last-close baseline MAE", f"{backtest['last_close_mae']:,.4f}", help="Simple comparison: predict that the next close stays at the latest close.")
+    test_columns[2].metric("Test candles", f"{backtest['holdout_candles']}", help="Final chronological portion of one-step walk-forward predictions.")
+    test_columns[3].metric("Trend direction correct", f"{backtest['directional_accuracy_pct']:.1f}%", help="Share of test candles where the predicted up/down/flat direction matched the next close.")
+    st.caption(
+        "At each test step, the forecast used only candles available before that target candle. "
+        f"OHLC average absolute miss (price units): open {backtest['ohlc_mae']['open']:,.4f}, "
+        f"high {backtest['ohlc_mae']['high']:,.4f}, low {backtest['ohlc_mae']['low']:,.4f}, "
+        f"close {backtest['ohlc_mae']['close']:,.4f}. This is historical testing, not a guarantee of future accuracy."
+    )
+    if backtest["trend_close_mae"] < backtest["last_close_mae"]:
+        st.caption("On this selected history, the trend baseline had a lower close-price error than the last-close comparison.")
+    else:
+        st.caption("On this selected history, the trend baseline did not beat the last-close comparison on close-price error.")
+
 proj_fig = go.Figure()
 visible = data.tail(min(200, len(data)))
 proj_fig.add_trace(go.Candlestick(
     x=visible.index, open=visible["Open"], high=visible["High"], low=visible["Low"], close=visible["Close"],
     name="Historical candles", increasing_line_color="#26a69a", decreasing_line_color="#ef5350"
+))
+proj_fig.add_trace(go.Candlestick(
+    x=future_times,
+    open=[candle["open"] for candle in forecast_candles],
+    high=[candle["high"] for candle in forecast_candles],
+    low=[candle["low"] for candle in forecast_candles],
+    close=[candle["close"] for candle in forecast_candles],
+    name="Forecast OHLC baseline",
+    increasing_line_color="#64b5f6", decreasing_line_color="#ffab91",
+    increasing_fillcolor="rgba(100,181,246,0.55)", decreasing_fillcolor="rgba(255,171,145,0.55)",
 ))
 proj_fig.add_trace(go.Scatter(x=future_times, y=projected, mode="lines+markers", name="Trend baseline",
     line=dict(dash="dash", width=2, color="#f5c542")))
@@ -279,6 +316,7 @@ proj_fig.add_trace(go.Scatter(x=future_times, y=projected - spread, mode="lines"
 proj_fig.update_layout(template="plotly_dark", height=520, xaxis_title="Time", yaxis_title="Price",
     xaxis_rangeslider_visible=False, hovermode="x unified")
 st.plotly_chart(proj_fig, use_container_width=True, config={"scrollZoom": True, "displaylogo": False}, key="historical_projection")
+st.caption("Blue/orange future candles show estimated Open, High, Low and Close. Their open/high/low use simple historical assumptions; the model being tested forecasts Close only. The shaded band is an observed-variation guide, not a probability promise.")
 
 projected_change = ((float(projected[-1]) / latest) - 1) * 100 if latest else 0
 if projected_change > 0.05:
