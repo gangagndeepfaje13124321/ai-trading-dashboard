@@ -104,6 +104,24 @@ class LiveForecastTests(unittest.TestCase):
             result["all"]["last_close_mae_pct"],
         )
 
+    def test_longer_second_scenario_has_requested_linear_ohlc_horizon(self):
+        history = [
+            candle(index, 100 + index, 100.2 + index, 99.8 + index, 100 + index)
+            for index in range(40)
+        ]
+
+        forecast = make_live_forecast(history, horizon_seconds=60)
+
+        self.assertEqual(len(forecast["forecast_candles"]), 60)
+        self.assertEqual(
+            forecast["forecast_candles"][-1]["time"],
+            history[-1]["time"] + timedelta(seconds=60),
+        )
+        closes = [row["close"] for row in forecast["forecast_candles"]]
+        self.assertTrue(all(later >= earlier for earlier, later in zip(closes, closes[1:])))
+        steps = [later - earlier for earlier, later in zip([history[-1]["close"]] + closes[:-1], closes)]
+        self.assertTrue(all(abs(step - steps[0]) < 1e-9 for step in steps))
+
 
 if __name__ == "__main__":
     unittest.main()
