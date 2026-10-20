@@ -262,4 +262,4 @@ with st.expander("Summary of patterns in the selected history"):
     else:
         st.write("There are not enough candles to summarise price changes.")
 
-st.caption("This version does not recommend trades or strategies. The forecast is a simple linear extrapolation of recent closes, with a rough uncertainty band. It does not yet use a trained AI model, order-book data, or a guaranteed live exchange feed. Yahoo Finance can de
+st.caption("This version does not recommend trades or strategies. The forecast is a simple linear extrapolation of recent closes, with a rough uncertainty band. It does not yet use a trained AI model, order-book data, or a guaranteed live exchange feed. Yahoo Finance can delay, omit, or limit intraday data.")
