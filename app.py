@@ -5,10 +5,19 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 from live_feed import get_first_valid_price
+from trade_candles import KrakenTradeFeed
 
 st.set_page_config(page_title="Market Pattern Explorer", page_icon="📈", layout="wide")
 st.title("📈 Market Pattern Explorer")
 st.caption("Candle-based market analysis and a short-range statistical projection. Educational only — not trading advice.")
+
+
+@st.cache_resource(show_spinner=False)
+def get_kraken_trade_feed(symbol):
+    """Share one thread-safe Kraken trade connection per market across sessions."""
+    feed = KrakenTradeFeed(symbol)
+    feed.start()
+    return feed
 
 INTERVALS = {
     "1 minute":  {"yf": "1m",  "tv": "1",  "periods": ["1d", "5d", "7d"], "default": "1d",  "minutes": 1},
@@ -284,12 +293,12 @@ st.caption("This dashboard describes historical price behaviour. It does not pro
 
 
 # Live sampled price and projection. This is deliberately separate from Yahoo historical candles.
-# Binance's public ticker endpoint gives current spot price, not native one-second OHLC candles.
+# Public spot ticker requests give sampled quotes; the trade stream below builds one-second OHLC candles.
 st.divider()
 st.subheader("Live spot tracker + rolling short-range projection")
 st.caption(
-    "For supported markets this samples a public spot ticker about every 2 seconds (Binance first, Kraken fallback). "
-    "These are sampled observations, not official one-second candles. The dashed line and shaded range are "
+    "For supported markets this samples a public spot ticker about every 2 seconds (Kraken first, Binance fallback). "
+    "These are sampled observations, not one-second candles. The dashed line and shaded range are "
     "simple baselines, not calibrated predictions."
 )
 
@@ -297,7 +306,12 @@ live_symbol_map = {
     "BTC-USD": "BTCUSDT", "ETH-USD": "ETHUSDT", "SOL-USD": "SOLUSDT",
     "BNB-USD": "BNBUSDT", "XRP-USD": "XRPUSDT", "DOGE-USD": "DOGEUSDT"
 }
+kraken_trade_symbols = {
+    "BTC-USD": "BTC/USD", "ETH-USD": "ETH/USD", "SOL-USD": "SOL/USD",
+    "BNB-USD": "BNB/USD", "XRP-USD": "XRP/USD", "DOGE-USD": "DOGE/USD"
+}
 live_pair = live_symbol_map.get(symbol_clean)
+trade_symbol = kraken_trade_symbols.get(symbol_clean)
 if not live_pair:
     st.info("Live spot sampling currently supports BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD and DOGE-USD. Other tickers still use the historical chart above.")
 else:
@@ -388,6 +402,58 @@ else:
         except Exception as exc:
             st.warning(f"Live spot feed is temporarily unavailable: {exc}. The historical chart above remains available.")
     live_market_panel()
+
+if trade_symbol:
+    st.subheader("Kraken trade-based 1-second candles")
+    st.caption(
+        "Each candle groups actual Kraken trades by their exchange timestamp into a UTC second. "
+        "Seconds with no trades are left empty. Kraken sends a small recent-trades snapshot when the feed connects; "
+        "the chart then builds history while this app is running."
+    )
+    trade_feed = get_kraken_trade_feed(trade_symbol)
+
+    @st.fragment(run_every="1s")
+    def kraken_candle_panel():
+        snapshot = trade_feed.snapshot()
+        candles = snapshot["candles"]
+        if snapshot["status"] == "connected":
+            last_trade_at = snapshot["last_trade_at"]
+            detail = "Kraken trade feed connected"
+            if last_trade_at is not None:
+                detail += f" · last exchange trade {last_trade_at.strftime('%H:%M:%S')} UTC"
+            st.caption(detail)
+        elif snapshot["status"] == "unavailable":
+            st.warning("Kraken trade feed unavailable: " + snapshot["detail"])
+        else:
+            st.caption("Kraken trade feed: " + snapshot["detail"])
+
+        if candles:
+            candle_fig = go.Figure(data=[go.Candlestick(
+                x=[candle["time"] for candle in candles],
+                open=[candle["open"] for candle in candles],
+                high=[candle["high"] for candle in candles],
+                low=[candle["low"] for candle in candles],
+                close=[candle["close"] for candle in candles],
+                name="Kraken trades"
+            )])
+            candle_fig.update_layout(
+                template="plotly_dark", height=440, hovermode="x unified",
+                xaxis_title="Time (UTC)", yaxis_title="Price (USD)",
+                xaxis_rangeslider_visible=True,
+                margin=dict(l=10, r=10, t=25, b=10)
+            )
+            st.plotly_chart(
+                candle_fig, use_container_width=True,
+                config={"scrollZoom": True, "displaylogo": False},
+                key=f"kraken_trade_candles_{symbol_clean}"
+            )
+            st.caption(f"Showing {len(candles)} recent trade-containing seconds. The current second can update as more trades arrive.")
+        else:
+            st.info("Waiting for Kraken trades. The candle chart will appear when trade data arrives.")
+
+    kraken_candle_panel()
+else:
+    st.info("Kraken one-second trade candles currently support BTC-USD, ETH-USD, SOL-USD, BNB-USD, XRP-USD, and DOGE-USD.")
 
 st.divider()
 st.subheader("Recent news and community discussion")
