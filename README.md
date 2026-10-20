@@ -1,15 +1,17 @@
 # Live Crypto Dashboard
 
-A Streamlit dashboard for viewing Kraken one-minute OHLC candles and a transparent, multi-signal short-horizon scenario.
+A compact Streamlit dashboard with a TradingView one-minute chart and a Kraken live one-second candle/scenario view.
 
 ## Main screen
 
-- Kraken's public REST OHLC endpoint supplies about 12 hours of recent one-minute bars. Kraken's public trade WebSocket updates the current minute candle as new trades arrive. The page redraws every second; the current candle is still forming until its minute ends.
-- Historical bars are kept from the OHLC endpoint. Recent streamed one-second trade candles are aggregated into minute candles and used to extend/update the current bar; empty minutes are not fabricated by the stream aggregator.
-- The right-hand view shows a broad scenario range, not a predicted candle path. Its width uses recent average true range; this is an observed-volatility range, not a calibrated probability interval or exact target.
-- The displayed direction combines fixed, readable rules: 9/21 EMA trend, 3- and 10-minute momentum, RSI extremes, 20-minute high/low breakouts, 20-minute volume-weighted price, and a confirmed classic-pattern break. A direction requires at least two active votes and 60% agreement among active votes. Votes can be correlated and are not probabilities.
-- This is **not a trained AI model** and does not place orders. The historical check walks through Kraken's recent candles in time order, only uses information available at each forecast origin, spaces test forecasts by the selected horizon, and compares direction calls with a simple continuation baseline. It does not account for spread, fees, slippage, or execution, and it is not proof of a profitable edge.
-- The WebSocket trade snapshot contains only the most recent 50 trades. Kraken's REST OHLC endpoint includes an unfinished current candle and is limited to roughly 12 hours of one-minute history; the app uses this for recent chart history and updates the current candle with the live stream.
+- The left chart is TradingView's hosted one-minute chart with its drawing toolbar. TradingView supplies this chart's market data, which can differ slightly from Kraken prices shown on the right.
+- The right chart uses Kraken's public trade WebSocket and groups real exchange trades into genuine one-second OHLC candles. The page redraws every second. Seconds with no trades are left blank, and no past one-second bars are downloaded.
+- The right chart adds a small number of hypothetical one-second OHLC scenario candles. The direction comes from a confirmed classic-pattern/range break, or otherwise recent price movement. It is not a trained model, and candle values are not actual future exchange prices.
+- A “buy-side watch” or “sell-side watch” is only a short-term direction label from those simple rules. “Wait” means they found no clear direction. These labels are not orders or evidence of profitability.
+- The app scores non-neutral scenarios against later Kraken trade candles while it is running. This short live sample is held in memory, resets when the app restarts, and does not account for spread, fees, slippage, or execution. It is not proof of a lasting edge.
+- Kraken's trade WebSocket sends only a recent-trade snapshot on connection, then live updates. The app keeps up to 15 minutes of observed trade-second candles in memory.
+
+The hosted TradingView widget does not let this Streamlit app add its own forecast series. The forecast is therefore shown as candles on the Kraken one-second chart, where its time interval and data source match the live trades.
 
 ## Historical analysis
 

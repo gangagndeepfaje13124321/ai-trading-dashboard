@@ -312,7 +312,10 @@ def make_live_forecast(candles, horizon_seconds=DEFAULT_HORIZON_SECONDS):
     elif setup["direction"] and setup["method"] == "breakout":
         reason = "A recent price range broke; this is tracked separately from classic chart patterns."
     elif direction:
-        reason = "No confirmed pattern breakout; the direction uses the recent 5-second momentum baseline."
+        reason = (
+            "No confirmed pattern breakout; the direction uses recent "
+            f"{horizon_seconds}-second price movement."
+        )
     else:
         reason = "No confirmed pattern breakout or clear short-term momentum."
 
